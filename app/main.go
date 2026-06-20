@@ -83,6 +83,113 @@ func isDoubleQuoteEscape(c byte) bool {
 	return c == '$' || c == '`' || c == '"' || c == '\\' || c == '\n'
 }
 
+// applyRedirections scans tokens for redirection operators (>, 1>, 2>, and their
+// >> append forms), opens the target files, and returns the remaining command
+// words plus the stdout/stderr writers to use. Files are created/truncated (or
+// appended) up front, mirroring how a real shell sets up redirections before
+// running the command.
+func applyRedirections(fields []string) (words []string, stdout, stderr *os.File, cleanup func(), ok bool) {
+	stdout, stderr = os.Stdout, os.Stderr
+	var opened []*os.File
+	cleanup = func() {
+		for _, f := range opened {
+			f.Close()
+		}
+	}
+
+	for i := 0; i < len(fields); i++ {
+		var dst **os.File
+		var mode int
+		switch fields[i] {
+		case ">", "1>":
+			dst, mode = &stdout, os.O_TRUNC
+		case ">>", "1>>":
+			dst, mode = &stdout, os.O_APPEND
+		case "2>":
+			dst, mode = &stderr, os.O_TRUNC
+		case "2>>":
+			dst, mode = &stderr, os.O_APPEND
+		default:
+			words = append(words, fields[i])
+			continue
+		}
+
+		if i+1 >= len(fields) {
+			fmt.Fprintln(os.Stderr, "syntax error near unexpected token `newline'")
+			cleanup()
+			return nil, nil, nil, func() {}, false
+		}
+		i++
+		f, ferr := os.OpenFile(fields[i], os.O_WRONLY|os.O_CREATE|mode, 0644)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", fields[i], ferr)
+			cleanup()
+			return nil, nil, nil, func() {}, false
+		}
+		opened = append(opened, f)
+		*dst = f
+	}
+	return words, stdout, stderr, cleanup, true
+}
+
+func run(words []string, stdout, stderr *os.File) {
+	name, args := words[0], words[1:]
+
+	switch name {
+	case "echo":
+		fmt.Fprintln(stdout, strings.Join(args, " "))
+	case "pwd":
+		if dir, gerr := os.Getwd(); gerr == nil {
+			fmt.Fprintln(stdout, dir)
+		} else {
+			fmt.Fprintln(stderr, "pwd:", gerr)
+		}
+	case "cd":
+		dir := "~"
+		if len(args) > 0 {
+			dir = args[0]
+		}
+		target := dir
+		if dir == "~" || strings.HasPrefix(dir, "~/") {
+			if home, herr := os.UserHomeDir(); herr == nil {
+				target = home + dir[1:]
+			}
+		}
+		if cerr := os.Chdir(target); cerr != nil {
+			fmt.Fprintf(stderr, "cd: %s: No such file or directory\n", dir)
+		}
+	case "exit":
+		code := 0
+		if len(args) > 0 {
+			if parsed, perr := strconv.Atoi(args[0]); perr == nil {
+				code = parsed
+			}
+		}
+		os.Exit(code)
+	case "type":
+		if len(args) > 0 {
+			target := args[0]
+			if builtins[target] {
+				fmt.Fprintf(stdout, "%s is a shell builtin\n", target)
+			} else if path, lerr := exec.LookPath(target); lerr == nil {
+				fmt.Fprintf(stdout, "%s is %s\n", target, path)
+			} else {
+				fmt.Fprintf(stdout, "%s: not found\n", target)
+			}
+		}
+	default:
+		if _, lerr := exec.LookPath(name); lerr != nil {
+			fmt.Fprintf(stderr, "%s: command not found\n", name)
+		} else {
+			cmd := exec.Command(name, args...)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = stdout
+			cmd.Stderr = stderr
+			cmd.Run() // exit status not tracked yet; child output is forwarded directly
+		}
+	}
+}
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -93,58 +200,11 @@ func main() {
 		fields := tokenize(strings.TrimRight(input, "\r\n"))
 
 		if len(fields) > 0 {
-			name, args := fields[0], fields[1:]
-
-			switch name {
-			case "echo":
-				fmt.Println(strings.Join(args, " "))
-			case "pwd":
-				if dir, gerr := os.Getwd(); gerr == nil {
-					fmt.Println(dir)
-				} else {
-					fmt.Fprintln(os.Stderr, "pwd:", gerr)
+			if words, stdout, stderr, cleanup, ok := applyRedirections(fields); ok {
+				if len(words) > 0 {
+					run(words, stdout, stderr)
 				}
-			case "cd":
-				dir := "~"
-				if len(args) > 0 {
-					dir = args[0]
-				}
-				target := dir
-				if dir == "~" || strings.HasPrefix(dir, "~/") {
-					if home, herr := os.UserHomeDir(); herr == nil {
-						target = home + dir[1:]
-					}
-				}
-				if cerr := os.Chdir(target); cerr != nil {
-					fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n", dir)
-				}
-			case "exit":
-				code := 0
-				if len(args) > 0 {
-					if parsed, perr := strconv.Atoi(args[0]); perr == nil {
-						code = parsed
-					}
-				}
-				os.Exit(code)
-			case "type":
-				if len(args) > 0 {
-					target := args[0]
-					if builtins[target] {
-						fmt.Printf("%s is a shell builtin\n", target)
-					} else if path, lerr := exec.LookPath(target); lerr == nil {
-						fmt.Printf("%s is %s\n", target, path)
-					} else {
-						fmt.Printf("%s: not found\n", target)
-					}
-				}
-			default:
-				if _, lerr := exec.LookPath(name); lerr != nil {
-					fmt.Printf("%s: command not found\n", name)
-				} else {
-					cmd := exec.Command(name, args...)
-					cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-					cmd.Run() // exit status not tracked yet; child output is forwarded directly
-				}
+				cleanup()
 			}
 		}
 
