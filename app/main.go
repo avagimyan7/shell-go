@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 )
@@ -30,8 +31,83 @@ var builtins = map[string]bool{
 // completer script.
 var completers = map[string]string{}
 
-// jobCounter assigns sequential job numbers to background commands.
-var jobCounter int
+// job records a background command for the jobs builtin.
+type job struct {
+	num     int
+	pid     int
+	command string // the command as run, without the trailing &
+}
+
+var jobList []*job
+
+// nextJobNum returns one more than the highest job number currently tracked
+// (so numbers recycle to 1 once the table empties).
+func nextJobNum() int {
+	max := 0
+	for _, j := range jobList {
+		if j.num > max {
+			max = j.num
+		}
+	}
+	return max + 1
+}
+
+// jobMarker is "+" for the highest-numbered job, "-" for the second-highest,
+// and a space for the rest.
+func jobMarker(num int) string {
+	first, second := 0, 0
+	for _, j := range jobList {
+		switch {
+		case j.num > first:
+			first, second = j.num, first
+		case j.num > second:
+			second = j.num
+		}
+	}
+	switch num {
+	case first:
+		return "+"
+	case second:
+		return "-"
+	default:
+		return " "
+	}
+}
+
+func formatJob(j *job, status string) string {
+	command := j.command
+	if status == "Running" {
+		command += " &"
+	}
+	return fmt.Sprintf("[%d]%s  %-24s%s\n", j.num, jobMarker(j.num), status, command)
+}
+
+// exited non-blockingly checks whether the job's process has finished, reaping
+// it in the process.
+func (j *job) exited() bool {
+	var ws syscall.WaitStatus
+	pid, err := syscall.Wait4(j.pid, &ws, syscall.WNOHANG, nil)
+	return err == nil && pid == j.pid
+}
+
+// reap reports finished background jobs as Done and drops them from the table.
+// When showRunning is set (the jobs builtin) it also lists still-running jobs.
+func reap(out *os.File, showRunning bool) {
+	var remaining []*job
+	var buf strings.Builder
+	for _, j := range jobList {
+		if j.exited() {
+			buf.WriteString(formatJob(j, "Done"))
+		} else {
+			if showRunning {
+				buf.WriteString(formatJob(j, "Running"))
+			}
+			remaining = append(remaining, j)
+		}
+	}
+	jobList = remaining
+	fmt.Fprint(out, buf.String())
+}
 
 // tokenize splits a command line into arguments following POSIX shell quoting
 // rules: single quotes preserve everything literally, double quotes allow a
@@ -196,7 +272,7 @@ func run(words []string, stdout, stderr *os.File) {
 	case "complete":
 		completeBuiltin(args, stdout, stderr)
 	case "jobs":
-		// No background-job tracking yet: with no jobs there is nothing to list.
+		reap(stdout, true)
 	default:
 		if _, lerr := exec.LookPath(name); lerr != nil {
 			fmt.Fprintf(stderr, "%s: command not found\n", name)
@@ -226,9 +302,9 @@ func runBackground(words []string, stdout, stderr *os.File) {
 		fmt.Fprintf(stderr, "%s: command not found\n", name)
 		return
 	}
-	jobCounter++
-	fmt.Printf("[%d] %d\n", jobCounter, cmd.Process.Pid)
-	go cmd.Wait() // reap the child when it finishes to avoid a zombie
+	num := nextJobNum()
+	jobList = append(jobList, &job{num: num, pid: cmd.Process.Pid, command: strings.Join(words, " ")})
+	fmt.Printf("[%d] %d\n", num, cmd.Process.Pid)
 }
 
 // completeBuiltin implements the `complete` builtin: -C registers a completer
@@ -498,6 +574,8 @@ func main() {
 	interactive := term.IsTerminal(fd)
 
 	for {
+		reap(os.Stdout, false) // report & remove finished background jobs before prompting
+
 		fmt.Print(prompt)
 
 		line, err := readLine(in, fd, interactive)
