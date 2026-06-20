@@ -17,6 +17,72 @@ var builtins = map[string]bool{
 	"type": true,
 }
 
+// tokenize splits a command line into arguments following POSIX shell quoting
+// rules: single quotes preserve everything literally, double quotes allow a
+// backslash to escape $ ` " \ (and newline), and an unquoted backslash escapes
+// the next character. Adjacent quoted/unquoted runs concatenate into one token.
+func tokenize(line string) []string {
+	const (
+		normal = iota
+		single
+		double
+	)
+
+	var tokens []string
+	var cur strings.Builder
+	state, inToken := normal, false
+
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch state {
+		case single:
+			if c == '\'' {
+				state = normal
+			} else {
+				cur.WriteByte(c)
+			}
+		case double:
+			switch {
+			case c == '"':
+				state = normal
+			case c == '\\' && i+1 < len(line) && isDoubleQuoteEscape(line[i+1]):
+				i++
+				cur.WriteByte(line[i])
+			default:
+				cur.WriteByte(c)
+			}
+		default: // normal
+			switch {
+			case c == '\'':
+				state, inToken = single, true
+			case c == '"':
+				state, inToken = double, true
+			case c == '\\' && i+1 < len(line):
+				i++
+				cur.WriteByte(line[i])
+				inToken = true
+			case c == ' ' || c == '\t':
+				if inToken {
+					tokens = append(tokens, cur.String())
+					cur.Reset()
+					inToken = false
+				}
+			default:
+				cur.WriteByte(c)
+				inToken = true
+			}
+		}
+	}
+	if inToken {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens
+}
+
+func isDoubleQuoteEscape(c byte) bool {
+	return c == '$' || c == '`' || c == '"' || c == '\\' || c == '\n'
+}
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -24,10 +90,9 @@ func main() {
 		fmt.Print("$ ")
 
 		input, err := reader.ReadString('\n')
-		line := strings.TrimRight(input, "\r\n")
+		fields := tokenize(strings.TrimRight(input, "\r\n"))
 
-		if line != "" {
-			fields := strings.Fields(line)
+		if len(fields) > 0 {
 			name, args := fields[0], fields[1:]
 
 			switch name {
