@@ -21,6 +21,7 @@ var builtins = map[string]bool{
 	"complete": true,
 	"echo":     true,
 	"exit":     true,
+	"jobs":     true,
 	"pwd":      true,
 	"type":     true,
 }
@@ -28,6 +29,9 @@ var builtins = map[string]bool{
 // completers maps a command name to the path of its registered `complete -C`
 // completer script.
 var completers = map[string]string{}
+
+// jobCounter assigns sequential job numbers to background commands.
+var jobCounter int
 
 // tokenize splits a command line into arguments following POSIX shell quoting
 // rules: single quotes preserve everything literally, double quotes allow a
@@ -191,6 +195,8 @@ func run(words []string, stdout, stderr *os.File) {
 		}
 	case "complete":
 		completeBuiltin(args, stdout, stderr)
+	case "jobs":
+		// No background-job tracking yet: with no jobs there is nothing to list.
 	default:
 		if _, lerr := exec.LookPath(name); lerr != nil {
 			fmt.Fprintf(stderr, "%s: command not found\n", name)
@@ -202,6 +208,27 @@ func run(words []string, stdout, stderr *os.File) {
 			cmd.Run() // exit status not tracked yet; child output is forwarded directly
 		}
 	}
+}
+
+// runBackground starts a command without waiting for it, letting it inherit the
+// shell's stdio so its output still reaches the terminal, then prints the
+// assigned job number and PID.
+func runBackground(words []string, stdout, stderr *os.File) {
+	if len(words) == 0 {
+		return
+	}
+	name, args := words[0], words[1:]
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(stderr, "%s: command not found\n", name)
+		return
+	}
+	jobCounter++
+	fmt.Printf("[%d] %d\n", jobCounter, cmd.Process.Pid)
+	go cmd.Wait() // reap the child when it finishes to avoid a zombie
 }
 
 // completeBuiltin implements the `complete` builtin: -C registers a completer
@@ -478,7 +505,9 @@ func main() {
 
 		if len(fields) > 0 {
 			if words, stdout, stderr, cleanup, ok := applyRedirections(fields); ok {
-				if len(words) > 0 {
+				if n := len(words); n > 0 && words[n-1] == "&" {
+					runBackground(words[:n-1], stdout, stderr)
+				} else if n > 0 {
 					run(words, stdout, stderr)
 				}
 				cleanup()
