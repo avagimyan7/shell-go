@@ -225,6 +225,8 @@ func editLine(in *bufio.Reader) (string, error) {
 			if completed, ok := complete(string(buf)); ok {
 				fmt.Print(completed[len(buf):])
 				buf = []byte(completed)
+			} else {
+				fmt.Print("\a") // bell: no completion available
 			}
 		case 0x7f, 0x08: // Backspace / Delete
 			if len(buf) > 0 {
