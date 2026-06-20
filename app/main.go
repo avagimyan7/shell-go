@@ -211,7 +211,7 @@ func tokenize(line string) []string {
 
 	var tokens []string
 	var cur strings.Builder
-	state, inToken := normal, false
+	state, inToken, quoted := normal, false, false
 
 	for i := 0; i < len(line); i++ {
 		c := line[i]
@@ -239,18 +239,20 @@ func tokenize(line string) []string {
 		default: // normal
 			switch {
 			case c == '\'':
-				state, inToken = single, true
+				state, inToken, quoted = single, true, true
 			case c == '"':
-				state, inToken = double, true
+				state, inToken, quoted = double, true, true
 			case c == '\\' && i+1 < len(line):
 				i++
 				cur.WriteByte(line[i])
 				inToken = true
 			case c == ' ' || c == '\t':
 				if inToken {
-					tokens = append(tokens, cur.String())
+					if cur.Len() > 0 || quoted {
+						tokens = append(tokens, cur.String())
+					}
 					cur.Reset()
-					inToken = false
+					inToken, quoted = false, false
 				}
 			case c == '$':
 				val, ni := expandVar(line, i+1)
@@ -263,7 +265,7 @@ func tokenize(line string) []string {
 			}
 		}
 	}
-	if inToken {
+	if inToken && (cur.Len() > 0 || quoted) {
 		tokens = append(tokens, cur.String())
 	}
 	return tokens
