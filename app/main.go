@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -194,18 +196,54 @@ func run(words []string, stdout, stderr *os.File) {
 }
 
 // complete returns the autocompletion for a partial command word, with a
-// trailing space, plus whether a unique match was found. For now it only
-// completes the echo and exit builtins.
+// trailing space, plus whether a single unique match was found. Candidates are
+// the builtins plus executable files found in PATH.
 func complete(prefix string) (string, bool) {
 	if prefix == "" {
 		return "", false
 	}
-	for _, name := range []string{"echo", "exit"} {
-		if strings.HasPrefix(name, prefix) {
-			return name + " ", true
-		}
+	matches := completionCandidates(prefix)
+	if len(matches) == 1 {
+		return matches[0] + " ", true
 	}
 	return "", false
+}
+
+// completionCandidates returns the sorted, de-duplicated set of builtin and
+// PATH-executable names that start with prefix.
+func completionCandidates(prefix string) []string {
+	set := map[string]struct{}{}
+
+	for name := range builtins {
+		if strings.HasPrefix(name, prefix) {
+			set[name] = struct{}{}
+		}
+	}
+
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue // PATH may list directories that don't exist or aren't readable
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, prefix) && isExecutable(filepath.Join(dir, name)) {
+				set[name] = struct{}{}
+			}
+		}
+	}
+
+	matches := make([]string, 0, len(set))
+	for name := range set {
+		matches = append(matches, name)
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+func isExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
 // editLine reads one line in raw mode, echoing input itself and handling Tab
