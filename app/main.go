@@ -12,6 +12,7 @@ import (
 var builtins = map[string]bool{
 	"echo": true,
 	"exit": true,
+	"pwd":  true,
 	"type": true,
 }
 
@@ -31,6 +32,12 @@ func main() {
 			switch name {
 			case "echo":
 				fmt.Println(strings.Join(args, " "))
+			case "pwd":
+				if dir, gerr := os.Getwd(); gerr == nil {
+					fmt.Println(dir)
+				} else {
+					fmt.Fprintln(os.Stderr, "pwd:", gerr)
+				}
 			case "exit":
 				code := 0
 				if len(args) > 0 {
