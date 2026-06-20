@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 var builtins = map[string]bool{
@@ -190,14 +193,85 @@ func run(words []string, stdout, stderr *os.File) {
 	}
 }
 
+// complete returns the autocompletion for a partial command word, with a
+// trailing space, plus whether a unique match was found. For now it only
+// completes the echo and exit builtins.
+func complete(prefix string) (string, bool) {
+	if prefix == "" {
+		return "", false
+	}
+	for _, name := range []string{"echo", "exit"} {
+		if strings.HasPrefix(name, prefix) {
+			return name + " ", true
+		}
+	}
+	return "", false
+}
+
+// editLine reads one line in raw mode, echoing input itself and handling Tab
+// completion, Backspace, Enter, and Ctrl-C/Ctrl-D.
+func editLine(in *bufio.Reader) (string, error) {
+	var buf []byte
+	for {
+		b, err := in.ReadByte()
+		if err != nil {
+			return string(buf), err
+		}
+		switch b {
+		case '\r', '\n':
+			fmt.Print("\r\n")
+			return string(buf), nil
+		case '\t':
+			if completed, ok := complete(string(buf)); ok {
+				fmt.Print(completed[len(buf):])
+				buf = []byte(completed)
+			}
+		case 0x7f, 0x08: // Backspace / Delete
+			if len(buf) > 0 {
+				buf = buf[:len(buf)-1]
+				fmt.Print("\b \b")
+			}
+		case 0x03: // Ctrl-C: discard the line and start fresh
+			fmt.Print("\r\n")
+			return "", nil
+		case 0x04: // Ctrl-D: end the shell only on an empty line
+			if len(buf) == 0 {
+				return "", io.EOF
+			}
+		default:
+			if b >= 0x20 { // printable character (or a UTF-8 continuation byte)
+				buf = append(buf, b)
+				fmt.Print(string(b))
+			}
+		}
+	}
+}
+
+// readLine reads one command line. On a real terminal it switches to raw mode
+// (for Tab completion and key handling) just for the duration of the read, then
+// restores cooked mode so command output is processed normally. When stdin is
+// not a terminal (e.g. piped input) it reads a plain line.
+func readLine(in *bufio.Reader, fd int, interactive bool) (string, error) {
+	if interactive {
+		if oldState, err := term.MakeRaw(fd); err == nil {
+			defer term.Restore(fd, oldState)
+			return editLine(in)
+		}
+	}
+	s, err := in.ReadString('\n')
+	return strings.TrimRight(s, "\r\n"), err
+}
+
 func main() {
-	reader := bufio.NewReader(os.Stdin)
+	in := bufio.NewReader(os.Stdin)
+	fd := int(os.Stdin.Fd())
+	interactive := term.IsTerminal(fd)
 
 	for {
 		fmt.Print("$ ")
 
-		input, err := reader.ReadString('\n')
-		fields := tokenize(strings.TrimRight(input, "\r\n"))
+		line, err := readLine(in, fd, interactive)
+		fields := tokenize(line)
 
 		if len(fields) > 0 {
 			if words, stdout, stderr, cleanup, ok := applyRedirections(fields); ok {
