@@ -234,6 +234,35 @@ func isExecutable(path string) bool {
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
+// candidatesFor splits the input line into the part before the word being
+// completed (head, including the trailing space) and the partial word itself,
+// then returns the completion candidates. The first word completes against
+// commands (builtins + PATH); later words complete against files in the cwd.
+func candidatesFor(line string) (head, word string, matches []string) {
+	if i := strings.LastIndex(line, " "); i >= 0 {
+		head, word = line[:i+1], line[i+1:]
+		return head, word, fileCandidates(word)
+	}
+	return "", line, completionCandidates(line)
+}
+
+// fileCandidates returns the sorted names of entries in the current directory
+// that start with prefix.
+func fileCandidates(prefix string) []string {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return nil
+	}
+	var matches []string
+	for _, e := range entries {
+		if name := e.Name(); strings.HasPrefix(name, prefix) {
+			matches = append(matches, name)
+		}
+	}
+	sort.Strings(matches)
+	return matches
+}
+
 func longestCommonPrefix(strs []string) string {
 	if len(strs) == 0 {
 		return ""
@@ -263,21 +292,21 @@ func editLine(in *bufio.Reader) (string, error) {
 		}
 
 		if b == '\t' {
-			matches := completionCandidates(string(buf))
+			head, word, matches := candidatesFor(string(buf))
 			switch {
 			case len(matches) == 0:
 				fmt.Print("\a") // bell: nothing to complete
 				lastTab = false
 			case len(matches) == 1:
 				completed := matches[0] + " "
-				fmt.Print(completed[len(buf):])
-				buf = []byte(completed)
+				fmt.Print(completed[len(word):])
+				buf = []byte(head + completed)
 				lastTab = false
 			default:
-				if lcp := longestCommonPrefix(matches); len(lcp) > len(buf) {
+				if lcp := longestCommonPrefix(matches); len(lcp) > len(word) {
 					// extend to the longest common prefix (no trailing space yet)
-					fmt.Print(lcp[len(buf):])
-					buf = []byte(lcp)
+					fmt.Print(lcp[len(word):])
+					buf = []byte(head + lcp)
 					lastTab = false
 				} else if lastTab { // second Tab: list all matches, then redraw the prompt
 					fmt.Print("\r\n" + strings.Join(matches, "  ") + "\r\n" + prompt + string(buf))
