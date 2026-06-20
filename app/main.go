@@ -21,12 +21,57 @@ const prompt = "$ "
 var builtins = map[string]bool{
 	"cd":       true,
 	"complete": true,
+	"declare":  true,
 	"echo":     true,
 	"exit":     true,
 	"history":  true,
 	"jobs":     true,
 	"pwd":      true,
 	"type":     true,
+}
+
+// variables holds shell variables set with the declare builtin.
+var variables = map[string]string{}
+
+func validIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		letter := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		digit := c >= '0' && c <= '9'
+		if letter || (i > 0 && digit) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// declareBuiltin implements `declare NAME=VALUE` (store a shell variable) and
+// `declare -p NAME` (print its definition, or an error if unset).
+func declareBuiltin(args []string, stdout, stderr *os.File) {
+	if len(args) >= 2 && args[0] == "-p" {
+		name := args[1]
+		if val, ok := variables[name]; ok {
+			fmt.Fprintf(stdout, "declare -- %s=%q\n", name, val)
+		} else {
+			fmt.Fprintf(stderr, "declare: %s: not found\n", name)
+		}
+		return
+	}
+	for _, arg := range args {
+		name, value, ok := strings.Cut(arg, "=")
+		if !ok {
+			continue
+		}
+		if validIdentifier(name) {
+			variables[name] = value
+		} else {
+			fmt.Fprintf(stderr, "declare: `%s': not a valid identifier\n", arg)
+		}
+	}
 }
 
 // history holds the command lines entered this session, oldest first.
@@ -184,6 +229,10 @@ func tokenize(line string) []string {
 			case c == '\\' && i+1 < len(line) && isDoubleQuoteEscape(line[i+1]):
 				i++
 				cur.WriteByte(line[i])
+			case c == '$':
+				val, ni := expandVar(line, i+1)
+				cur.WriteString(val)
+				i = ni - 1
 			default:
 				cur.WriteByte(c)
 			}
@@ -203,6 +252,11 @@ func tokenize(line string) []string {
 					cur.Reset()
 					inToken = false
 				}
+			case c == '$':
+				val, ni := expandVar(line, i+1)
+				cur.WriteString(val)
+				i = ni - 1
+				inToken = true
 			default:
 				cur.WriteByte(c)
 				inToken = true
@@ -217,6 +271,42 @@ func tokenize(line string) []string {
 
 func isDoubleQuoteEscape(c byte) bool {
 	return c == '$' || c == '`' || c == '"' || c == '\\' || c == '\n'
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentChar(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
+}
+
+// expandVar reads a $NAME or ${NAME} reference at line[i:] (i points just past
+// the $) and returns the variable's value (empty if unset) and the index just
+// after the reference. A $ not followed by a name stays literal.
+func expandVar(line string, i int) (value string, next int) {
+	if i >= len(line) {
+		return "$", i
+	}
+	if line[i] == '{' {
+		j := i + 1
+		for j < len(line) && line[j] != '}' {
+			j++
+		}
+		name := line[i+1 : j]
+		if j < len(line) {
+			j++ // consume the closing brace
+		}
+		return variables[name], j
+	}
+	if !isIdentStart(line[i]) {
+		return "$", i
+	}
+	j := i
+	for j < len(line) && isIdentChar(line[j]) {
+		j++
+	}
+	return variables[line[i:j]], j
 }
 
 // applyRedirections scans tokens for redirection operators (>, 1>, 2>, and their
@@ -318,6 +408,8 @@ func run(words []string, stdout, stderr *os.File) {
 		}
 	case "complete":
 		completeBuiltin(args, stdout, stderr)
+	case "declare":
+		declareBuiltin(args, stdout, stderr)
 	case "jobs":
 		reap(stdout, true)
 	case "history":
