@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+var builtins = map[string]bool{
+	"echo": true,
+	"exit": true,
+	"type": true,
+}
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -32,6 +38,15 @@ func main() {
 					}
 				}
 				os.Exit(code)
+			case "type":
+				if len(args) > 0 {
+					target := args[0]
+					if builtins[target] {
+						fmt.Printf("%s is a shell builtin\n", target)
+					} else {
+						fmt.Printf("%s: not found\n", target)
+					}
+				}
 			default:
 				fmt.Printf("%s: command not found\n", name)
 			}
