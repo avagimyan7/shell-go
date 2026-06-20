@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -43,6 +44,8 @@ func main() {
 					target := args[0]
 					if builtins[target] {
 						fmt.Printf("%s is a shell builtin\n", target)
+					} else if path, lerr := exec.LookPath(target); lerr == nil {
+						fmt.Printf("%s is %s\n", target, path)
 					} else {
 						fmt.Printf("%s: not found\n", target)
 					}
