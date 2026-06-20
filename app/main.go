@@ -22,6 +22,8 @@ func main() {
 			name, args := fields[0], fields[1:]
 
 			switch name {
+			case "echo":
+				fmt.Println(strings.Join(args, " "))
 			case "exit":
 				code := 0
 				if len(args) > 0 {
