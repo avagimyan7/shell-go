@@ -14,6 +14,8 @@ import (
 	"golang.org/x/term"
 )
 
+const prompt = "$ "
+
 var builtins = map[string]bool{
 	"cd":   true,
 	"echo": true,
@@ -195,20 +197,6 @@ func run(words []string, stdout, stderr *os.File) {
 	}
 }
 
-// complete returns the autocompletion for a partial command word, with a
-// trailing space, plus whether a single unique match was found. Candidates are
-// the builtins plus executable files found in PATH.
-func complete(prefix string) (string, bool) {
-	if prefix == "" {
-		return "", false
-	}
-	matches := completionCandidates(prefix)
-	if len(matches) == 1 {
-		return matches[0] + " ", true
-	}
-	return "", false
-}
-
 // completionCandidates returns the sorted, de-duplicated set of builtin and
 // PATH-executable names that start with prefix.
 func completionCandidates(prefix string) []string {
@@ -250,22 +238,39 @@ func isExecutable(path string) bool {
 // completion, Backspace, Enter, and Ctrl-C/Ctrl-D.
 func editLine(in *bufio.Reader) (string, error) {
 	var buf []byte
+	lastTab := false // the previous keypress was a Tab on this same input
+
 	for {
 		b, err := in.ReadByte()
 		if err != nil {
 			return string(buf), err
 		}
+
+		if b == '\t' {
+			matches := completionCandidates(string(buf))
+			switch {
+			case len(matches) == 0:
+				fmt.Print("\a") // bell: nothing to complete
+			case len(matches) == 1:
+				completed := matches[0] + " "
+				fmt.Print(completed[len(buf):])
+				buf = []byte(completed)
+			default:
+				if lastTab { // second Tab: list all matches, then redraw the prompt
+					fmt.Print("\r\n" + strings.Join(matches, "  ") + "\r\n" + prompt + string(buf))
+				} else { // first Tab: ring the bell
+					fmt.Print("\a")
+				}
+			}
+			lastTab = len(matches) > 1 && !lastTab
+			continue
+		}
+
+		lastTab = false
 		switch b {
 		case '\r', '\n':
 			fmt.Print("\r\n")
 			return string(buf), nil
-		case '\t':
-			if completed, ok := complete(string(buf)); ok {
-				fmt.Print(completed[len(buf):])
-				buf = []byte(completed)
-			} else {
-				fmt.Print("\a") // bell: no completion available
-			}
 		case 0x7f, 0x08: // Backspace / Delete
 			if len(buf) > 0 {
 				buf = buf[:len(buf)-1]
@@ -308,7 +313,7 @@ func main() {
 	interactive := term.IsTerminal(fd)
 
 	for {
-		fmt.Print("$ ")
+		fmt.Print(prompt)
 
 		line, err := readLine(in, fd, interactive)
 		fields := tokenize(line)
