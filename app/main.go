@@ -17,12 +17,17 @@ import (
 const prompt = "$ "
 
 var builtins = map[string]bool{
-	"cd":   true,
-	"echo": true,
-	"exit": true,
-	"pwd":  true,
-	"type": true,
+	"cd":       true,
+	"complete": true,
+	"echo":     true,
+	"exit":     true,
+	"pwd":      true,
+	"type":     true,
 }
+
+// completers maps a command name to the path of its registered `complete -C`
+// completer script.
+var completers = map[string]string{}
 
 // tokenize splits a command line into arguments following POSIX shell quoting
 // rules: single quotes preserve everything literally, double quotes allow a
@@ -184,6 +189,8 @@ func run(words []string, stdout, stderr *os.File) {
 				fmt.Fprintf(stdout, "%s: not found\n", target)
 			}
 		}
+	case "complete":
+		completeBuiltin(args, stdout, stderr)
 	default:
 		if _, lerr := exec.LookPath(name); lerr != nil {
 			fmt.Fprintf(stderr, "%s: command not found\n", name)
@@ -194,6 +201,30 @@ func run(words []string, stdout, stderr *os.File) {
 			cmd.Stderr = stderr
 			cmd.Run() // exit status not tracked yet; child output is forwarded directly
 		}
+	}
+}
+
+// completeBuiltin implements the `complete` builtin: -C registers a completer
+// script for one or more commands, -p prints a command's registered spec (or an
+// error if none), and -r removes a command's spec.
+func completeBuiltin(args []string, stdout, stderr *os.File) {
+	if len(args) < 2 {
+		return
+	}
+	switch args[0] {
+	case "-C":
+		for _, command := range args[2:] {
+			completers[command] = args[1]
+		}
+	case "-p":
+		command := args[1]
+		if script, ok := completers[command]; ok {
+			fmt.Fprintf(stdout, "complete -C '%s' %s\n", script, command)
+		} else {
+			fmt.Fprintf(stderr, "complete: %s: no completion specification\n", command)
+		}
+	case "-r":
+		delete(completers, args[1])
 	}
 }
 
@@ -239,11 +270,44 @@ func isExecutable(path string) bool {
 // then returns the completion candidates. The first word completes against
 // commands (builtins + PATH); later words complete against files in the cwd.
 func candidatesFor(line string) (head, word string, matches []string, isFile bool) {
-	if i := strings.LastIndex(line, " "); i >= 0 {
-		head, word = line[:i+1], line[i+1:]
-		return head, word, fileCandidates(word), true
+	i := strings.LastIndex(line, " ")
+	if i < 0 {
+		// completing the command itself: builtins + PATH executables
+		return "", line, completionCandidates(line), false
 	}
-	return "", line, completionCandidates(line), false
+	head, word = line[:i+1], line[i+1:]
+	// completing an argument: a registered completer script wins over files
+	if fields := strings.Fields(line); len(fields) > 0 {
+		if script, ok := completers[fields[0]]; ok {
+			prev := ""
+			if hf := strings.Fields(head); len(hf) > 0 {
+				prev = hf[len(hf)-1]
+			}
+			return head, word, runCompleter(script, fields[0], word, prev, line), false
+		}
+	}
+	return head, word, fileCandidates(word), true
+}
+
+// runCompleter invokes a registered `complete -C` script, passing the command,
+// the word being completed, and the previous word as arguments, plus COMP_LINE
+// and COMP_POINT in the environment. Each non-empty stdout line is a candidate.
+func runCompleter(script, command, word, prev, line string) []string {
+	cmd := exec.Command(script, command, word, prev)
+	cmd.Env = append(os.Environ(),
+		"COMP_LINE="+line,
+		fmt.Sprintf("COMP_POINT=%d", len(line)),
+	)
+	out, _ := cmd.Output()
+
+	var cands []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if l != "" {
+			cands = append(cands, l)
+		}
+	}
+	sort.Strings(cands)
+	return cands
 }
 
 func isDir(path string) bool {
