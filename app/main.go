@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/term"
@@ -284,6 +285,87 @@ func run(words []string, stdout, stderr *os.File) {
 			cmd.Run() // exit status not tracked yet; child output is forwarded directly
 		}
 	}
+}
+
+// splitPipeline splits tokens on the `|` operator into per-command stages.
+func splitPipeline(fields []string) [][]string {
+	var stages [][]string
+	var cur []string
+	for _, f := range fields {
+		if f == "|" {
+			stages = append(stages, cur)
+			cur = nil
+		} else {
+			cur = append(cur, f)
+		}
+	}
+	return append(stages, cur)
+}
+
+func hasPipe(fields []string) bool {
+	for _, f := range fields {
+		if f == "|" {
+			return true
+		}
+	}
+	return false
+}
+
+func closePipeEnd(f *os.File) {
+	if f != os.Stdin && f != os.Stdout && f != os.Stderr {
+		f.Close()
+	}
+}
+
+// runPipeline wires each stage's stdout to the next stage's stdin and runs them
+// concurrently. Builtins run in goroutines (in this process); external commands
+// are spawned. The first stage reads the terminal, the last writes to it.
+func runPipeline(stages [][]string) {
+	n := len(stages)
+	ins := make([]*os.File, n)
+	outs := make([]*os.File, n)
+	ins[0], outs[n-1] = os.Stdin, os.Stdout
+	for i := 0; i < n-1; i++ {
+		r, w, err := os.Pipe()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		outs[i], ins[i+1] = w, r
+	}
+
+	var wg sync.WaitGroup
+	var cmds []*exec.Cmd
+	for i, stage := range stages {
+		if len(stage) == 0 {
+			continue
+		}
+		in, out := ins[i], outs[i]
+		if builtins[stage[0]] {
+			wg.Add(1)
+			go func(words []string, in, out *os.File) {
+				defer wg.Done()
+				run(words, out, os.Stderr)
+				closePipeEnd(in)
+				closePipeEnd(out)
+			}(stage, in, out)
+			continue
+		}
+		cmd := exec.Command(stage[0], stage[1:]...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, os.Stderr
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: command not found\n", stage[0])
+		} else {
+			cmds = append(cmds, cmd)
+		}
+		closePipeEnd(in)
+		closePipeEnd(out)
+	}
+
+	for _, cmd := range cmds {
+		cmd.Wait()
+	}
+	wg.Wait()
 }
 
 // runBackground starts a command without waiting for it, letting it inherit the
@@ -582,7 +664,9 @@ func main() {
 		fields := tokenize(line)
 
 		if len(fields) > 0 {
-			if words, stdout, stderr, cleanup, ok := applyRedirections(fields); ok {
+			if hasPipe(fields) {
+				runPipeline(splitPipeline(fields))
+			} else if words, stdout, stderr, cleanup, ok := applyRedirections(fields); ok {
 				if n := len(words); n > 0 && words[n-1] == "&" {
 					runBackground(words[:n-1], stdout, stderr)
 				} else if n > 0 {
