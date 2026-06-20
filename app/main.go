@@ -23,10 +23,14 @@ var builtins = map[string]bool{
 	"complete": true,
 	"echo":     true,
 	"exit":     true,
+	"history":  true,
 	"jobs":     true,
 	"pwd":      true,
 	"type":     true,
 }
+
+// history holds the command lines entered this session, oldest first.
+var history []string
 
 // completers maps a command name to the path of its registered `complete -C`
 // completer script.
@@ -274,6 +278,16 @@ func run(words []string, stdout, stderr *os.File) {
 		completeBuiltin(args, stdout, stderr)
 	case "jobs":
 		reap(stdout, true)
+	case "history":
+		start := 0
+		if len(args) > 0 {
+			if n, err := strconv.Atoi(args[0]); err == nil && n >= 0 && n < len(history) {
+				start = len(history) - n
+			}
+		}
+		for i := start; i < len(history); i++ {
+			fmt.Fprintf(stdout, "%5d  %s\n", i+1, history[i])
+		}
 	default:
 		if _, lerr := exec.LookPath(name); lerr != nil {
 			fmt.Fprintf(stderr, "%s: command not found\n", name)
@@ -664,6 +678,7 @@ func main() {
 		fields := tokenize(line)
 
 		if len(fields) > 0 {
+			history = append(history, line)
 			if hasPipe(fields) {
 				runPipeline(splitPipeline(fields))
 			} else if words, stdout, stderr, cleanup, ok := applyRedirections(fields); ok {
