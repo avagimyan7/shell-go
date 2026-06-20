@@ -234,6 +234,22 @@ func isExecutable(path string) bool {
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
+func longestCommonPrefix(strs []string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	prefix := strs[0]
+	for _, s := range strs[1:] {
+		for !strings.HasPrefix(s, prefix) {
+			prefix = prefix[:len(prefix)-1]
+			if prefix == "" {
+				return ""
+			}
+		}
+	}
+	return prefix
+}
+
 // editLine reads one line in raw mode, echoing input itself and handling Tab
 // completion, Backspace, Enter, and Ctrl-C/Ctrl-D.
 func editLine(in *bufio.Reader) (string, error) {
@@ -251,18 +267,26 @@ func editLine(in *bufio.Reader) (string, error) {
 			switch {
 			case len(matches) == 0:
 				fmt.Print("\a") // bell: nothing to complete
+				lastTab = false
 			case len(matches) == 1:
 				completed := matches[0] + " "
 				fmt.Print(completed[len(buf):])
 				buf = []byte(completed)
+				lastTab = false
 			default:
-				if lastTab { // second Tab: list all matches, then redraw the prompt
+				if lcp := longestCommonPrefix(matches); len(lcp) > len(buf) {
+					// extend to the longest common prefix (no trailing space yet)
+					fmt.Print(lcp[len(buf):])
+					buf = []byte(lcp)
+					lastTab = false
+				} else if lastTab { // second Tab: list all matches, then redraw the prompt
 					fmt.Print("\r\n" + strings.Join(matches, "  ") + "\r\n" + prompt + string(buf))
+					lastTab = false
 				} else { // first Tab: ring the bell
 					fmt.Print("\a")
+					lastTab = true
 				}
 			}
-			lastTab = len(matches) > 1 && !lastTab
 			continue
 		}
 
