@@ -51,7 +51,13 @@ func main() {
 					}
 				}
 			default:
-				fmt.Printf("%s: command not found\n", name)
+				if _, lerr := exec.LookPath(name); lerr != nil {
+					fmt.Printf("%s: command not found\n", name)
+				} else {
+					cmd := exec.Command(name, args...)
+					cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+					cmd.Run() // exit status not tracked yet; child output is forwarded directly
+				}
 			}
 		}
 
