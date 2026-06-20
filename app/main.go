@@ -32,6 +32,45 @@ var builtins = map[string]bool{
 // history holds the command lines entered this session, oldest first.
 var history []string
 
+// histLastAppend is how many history entries have already been written to the
+// history file (so `history -a` and exit append only newer ones).
+var histLastAppend int
+
+func readHistoryFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line != "" {
+			history = append(history, line)
+		}
+	}
+}
+
+func writeHistoryFile(path string) {
+	var sb strings.Builder
+	for _, h := range history {
+		sb.WriteString(h)
+		sb.WriteByte('\n')
+	}
+	if os.WriteFile(path, []byte(sb.String()), 0644) == nil {
+		histLastAppend = len(history)
+	}
+}
+
+func appendHistoryFile(path string) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	for _, h := range history[histLastAppend:] {
+		fmt.Fprintln(f, h)
+	}
+	f.Close()
+	histLastAppend = len(history)
+}
+
 // completers maps a command name to the path of its registered `complete -C`
 // completer script.
 var completers = map[string]string{}
@@ -256,6 +295,9 @@ func run(words []string, stdout, stderr *os.File) {
 			fmt.Fprintf(stderr, "cd: %s: No such file or directory\n", dir)
 		}
 	case "exit":
+		if histfile := os.Getenv("HISTFILE"); histfile != "" {
+			appendHistoryFile(histfile)
+		}
 		code := 0
 		if len(args) > 0 {
 			if parsed, perr := strconv.Atoi(args[0]); perr == nil {
@@ -279,14 +321,23 @@ func run(words []string, stdout, stderr *os.File) {
 	case "jobs":
 		reap(stdout, true)
 	case "history":
-		start := 0
-		if len(args) > 0 {
-			if n, err := strconv.Atoi(args[0]); err == nil && n >= 0 && n < len(history) {
-				start = len(history) - n
+		switch {
+		case len(args) >= 2 && args[0] == "-r":
+			readHistoryFile(args[1])
+		case len(args) >= 2 && args[0] == "-w":
+			writeHistoryFile(args[1])
+		case len(args) >= 2 && args[0] == "-a":
+			appendHistoryFile(args[1])
+		default:
+			start := 0
+			if len(args) > 0 {
+				if n, err := strconv.Atoi(args[0]); err == nil && n >= 0 && n < len(history) {
+					start = len(history) - n
+				}
 			}
-		}
-		for i := start; i < len(history); i++ {
-			fmt.Fprintf(stdout, "%5d  %s\n", i+1, history[i])
+			for i := start; i < len(history); i++ {
+				fmt.Fprintf(stdout, "%5d  %s\n", i+1, history[i])
+			}
 		}
 	default:
 		if _, lerr := exec.LookPath(name); lerr != nil {
@@ -587,12 +638,37 @@ func longestCommonPrefix(strs []string) string {
 // completion, Backspace, Enter, and Ctrl-C/Ctrl-D.
 func editLine(in *bufio.Reader) (string, error) {
 	var buf []byte
-	lastTab := false // the previous keypress was a Tab on this same input
+	lastTab := false        // the previous keypress was a Tab on this same input
+	histIdx := len(history) // navigation cursor; len(history) means "new line"
+
+	redraw := func() {
+		fmt.Print("\r\x1b[K" + prompt + string(buf))
+	}
 
 	for {
 		b, err := in.ReadByte()
 		if err != nil {
 			return string(buf), err
+		}
+
+		if b == 0x1b { // ESC: arrow-key sequence (ESC [ A/B)
+			b1, _ := in.ReadByte()
+			b2, _ := in.ReadByte()
+			if b1 == '[' && b2 == 'A' && histIdx > 0 { // up
+				histIdx--
+				buf = []byte(history[histIdx])
+				redraw()
+			} else if b1 == '[' && b2 == 'B' && histIdx < len(history) { // down
+				histIdx++
+				if histIdx == len(history) {
+					buf = nil
+				} else {
+					buf = []byte(history[histIdx])
+				}
+				redraw()
+			}
+			lastTab = false
+			continue
 		}
 
 		if b == '\t' {
@@ -668,6 +744,11 @@ func main() {
 	in := bufio.NewReader(os.Stdin)
 	fd := int(os.Stdin.Fd())
 	interactive := term.IsTerminal(fd)
+
+	if histfile := os.Getenv("HISTFILE"); histfile != "" {
+		readHistoryFile(histfile)
+		histLastAppend = len(history)
+	}
 
 	for {
 		reap(os.Stdout, false) // report & remove finished background jobs before prompting
