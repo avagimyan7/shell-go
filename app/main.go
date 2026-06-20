@@ -10,6 +10,7 @@ import (
 )
 
 var builtins = map[string]bool{
+	"cd":   true,
 	"echo": true,
 	"exit": true,
 	"pwd":  true,
@@ -37,6 +38,20 @@ func main() {
 					fmt.Println(dir)
 				} else {
 					fmt.Fprintln(os.Stderr, "pwd:", gerr)
+				}
+			case "cd":
+				dir := "~"
+				if len(args) > 0 {
+					dir = args[0]
+				}
+				target := dir
+				if dir == "~" || strings.HasPrefix(dir, "~/") {
+					if home, herr := os.UserHomeDir(); herr == nil {
+						target = home + dir[1:]
+					}
+				}
+				if cerr := os.Chdir(target); cerr != nil {
+					fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n", dir)
 				}
 			case "exit":
 				code := 0
