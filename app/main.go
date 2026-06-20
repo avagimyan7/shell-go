@@ -238,12 +238,43 @@ func isExecutable(path string) bool {
 // completed (head, including the trailing space) and the partial word itself,
 // then returns the completion candidates. The first word completes against
 // commands (builtins + PATH); later words complete against files in the cwd.
-func candidatesFor(line string) (head, word string, matches []string) {
+func candidatesFor(line string) (head, word string, matches []string, isFile bool) {
 	if i := strings.LastIndex(line, " "); i >= 0 {
 		head, word = line[:i+1], line[i+1:]
-		return head, word, fileCandidates(word)
+		return head, word, fileCandidates(word), true
 	}
-	return "", line, completionCandidates(line)
+	return "", line, completionCandidates(line), false
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// completionSuffix is appended after a fully completed token: a slash for a
+// directory (so the user can keep descending the path) or a space otherwise.
+func completionSuffix(match string, isFile bool) string {
+	if isFile && isDir(match) {
+		return "/"
+	}
+	return " "
+}
+
+// displayMatches renders the match list shown on a double Tab, marking
+// directories with a trailing slash.
+func displayMatches(matches []string, isFile bool) string {
+	if !isFile {
+		return strings.Join(matches, "  ")
+	}
+	shown := make([]string, len(matches))
+	for i, m := range matches {
+		if isDir(m) {
+			shown[i] = m + "/"
+		} else {
+			shown[i] = m
+		}
+	}
+	return strings.Join(shown, "  ")
 }
 
 // fileCandidates returns the sorted entries that match the file word being
@@ -302,13 +333,13 @@ func editLine(in *bufio.Reader) (string, error) {
 		}
 
 		if b == '\t' {
-			head, word, matches := candidatesFor(string(buf))
+			head, word, matches, isFile := candidatesFor(string(buf))
 			switch {
 			case len(matches) == 0:
 				fmt.Print("\a") // bell: nothing to complete
 				lastTab = false
 			case len(matches) == 1:
-				completed := matches[0] + " "
+				completed := matches[0] + completionSuffix(matches[0], isFile)
 				fmt.Print(completed[len(word):])
 				buf = []byte(head + completed)
 				lastTab = false
@@ -319,7 +350,7 @@ func editLine(in *bufio.Reader) (string, error) {
 					buf = []byte(head + lcp)
 					lastTab = false
 				} else if lastTab { // second Tab: list all matches, then redraw the prompt
-					fmt.Print("\r\n" + strings.Join(matches, "  ") + "\r\n" + prompt + string(buf))
+					fmt.Print("\r\n" + displayMatches(matches, isFile) + "\r\n" + prompt + string(buf))
 					lastTab = false
 				} else { // first Tab: ring the bell
 					fmt.Print("\a")
