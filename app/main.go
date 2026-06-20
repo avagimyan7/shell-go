@@ -246,17 +246,27 @@ func candidatesFor(line string) (head, word string, matches []string) {
 	return "", line, completionCandidates(line)
 }
 
-// fileCandidates returns the sorted names of entries in the current directory
-// that start with prefix.
-func fileCandidates(prefix string) []string {
-	entries, err := os.ReadDir(".")
+// fileCandidates returns the sorted entries that match the file word being
+// completed. If the word contains a slash, the part up to the last slash is the
+// directory to list and the rest is the prefix; candidates keep that directory
+// prefix so they replace the whole typed path.
+func fileCandidates(word string) []string {
+	dir, prefix := "", word
+	if i := strings.LastIndex(word, "/"); i >= 0 {
+		dir, prefix = word[:i+1], word[i+1:]
+	}
+	listPath := dir
+	if listPath == "" {
+		listPath = "."
+	}
+	entries, err := os.ReadDir(listPath)
 	if err != nil {
 		return nil
 	}
 	var matches []string
 	for _, e := range entries {
 		if name := e.Name(); strings.HasPrefix(name, prefix) {
-			matches = append(matches, name)
+			matches = append(matches, dir+name)
 		}
 	}
 	sort.Strings(matches)
